@@ -53,7 +53,61 @@
         const canvas = document.getElementById("gravityCanvas");
         const ctx = canvas.getContext("2d");
 
-        // Resize canvas to fill the window in CSS pixels
+        // ------------------------------
+        // Ball characteristics
+        // ------------------------------
+        const BALL_MIN_RADIUS = 5;
+        const BALL_MAX_RADIUS = 20;
+
+        // Fraction of radius where the solid core ends and the soft edge begins.
+        // Example: 0.75 -> inner 75% solid, outer 25% soft edge.
+        const BALL_EDGE_SOFT_START = 0.1;
+
+        // Alpha for the center and edge of the ball gradient
+        const BALL_CENTER_ALPHA = 1.0;
+        const BALL_EDGE_ALPHA = 0.1;
+
+        // ------------------------------
+        // Trail characteristics
+        // ------------------------------
+
+        // How long a trail segment lives in milliseconds
+        const TRAIL_DURATION_MS = 5000;
+
+        // Minimal movement (in pixels) before adding a new trail point
+        const TRAIL_MIN_DISTANCE = 0.5;
+
+        // Base width of the trail as a fraction of ball radius.
+        // Example: 0.5 -> baseWidth = radius * 0.5
+        const TRAIL_BASE_WIDTH_FACTOR = 0.5;
+
+        // Maximum alpha for the trail (the freshest segment near the ball)
+        const TRAIL_MAX_ALPHA = 0.5;
+
+        // ------------------------------
+        // Speed-to-color mapping
+        // ------------------------------
+
+        // Hues for slow / average / fast speeds
+        const SPEED_COLOR_HUE_SLOW = 200; // blue-ish
+        const SPEED_COLOR_HUE_MID  = 120; // green
+        const SPEED_COLOR_HUE_FAST = 0;   // red
+
+        // Saturation and lightness for all speeds
+        const SPEED_COLOR_SAT = 100;
+        const SPEED_COLOR_LUM = 60;
+
+        // ------------------------------
+        // Physics / simulation parameters
+        // ------------------------------
+        const G = 0.5;           // gravitational constant
+        const SOFTENING = 20;    // softening term to avoid singularities
+        const BOUNCE_DAMPING = 0.95;
+        const MAX_BALLS = 120;
+
+        // ------------------------------
+        // Canvas and resize handling
+        // ------------------------------
         function resizeCanvas() {
             canvas.width = window.innerWidth;
             canvas.height = window.innerHeight;
@@ -62,99 +116,78 @@
         window.addEventListener("resize", resizeCanvas);
         resizeCanvas();
 
-        // Physics parameters and storage
         const balls = [];
-        const MIN_RADIUS = 5;
-        const MAX_RADIUS = 20;
-
-        // Gravitational constant – adjust to taste for stronger or weaker attraction
-        const G = 0.5;
-
-        // Softening term to avoid infinite forces at zero distance
-        const SOFTENING = 20;
-
-        // Velocity damping factor on wall bounces
-        const BOUNCE_DAMPING = 0.95;
-
-        // Hard limit on ball count to avoid huge performance drops
-        const MAX_BALLS = 120;
-
-        // Trail settings
-        const TRAIL_DURATION = 5000; // ms, full fade-out time
-        const TRAIL_MIN_DISTANCE = 0.5; // minimal movement before adding a new trail point
 
         function randomInRange(min, max) {
             return min + Math.random() * (max - min);
         }
 
-        // Map scalar speed to an HSL color based on current frame stats
-        // Slow: blue (hue ~200), average: green (hue ~120), fast: red (hue ~0)
+        // Map scalar speed to an HSL color object based on current frame stats
+        // Slow: blue, average: green, fast: red
         function getColorForSpeed(speed, minSpeed, avgSpeed, maxSpeed) {
             if (!Number.isFinite(speed)) {
                 speed = 0;
             }
 
-            // Fallback if all speeds are identical (or only one ball)
             if (!Number.isFinite(minSpeed) || !Number.isFinite(maxSpeed) ||
                 maxSpeed <= minSpeed + 1e-6) {
-                return "hsl(120, 100%, 60%)";
+                return {
+                    h: SPEED_COLOR_HUE_MID,
+                    s: SPEED_COLOR_SAT,
+                    l: SPEED_COLOR_LUM
+                };
             }
 
-            const hueSlow = 200;
-            const hueMid = 120;
-            const hueFast = 0;
+            let hue;
 
-            // Handle degenerate average cases gracefully
             if (avgSpeed <= minSpeed + 1e-6) {
-                // No "slower than average" side, map linearly between min and max (green to red)
                 const t = (speed - minSpeed) / (maxSpeed - minSpeed);
                 const clamped = Math.min(Math.max(t, 0), 1);
-                const hue = hueMid + (hueFast - hueMid) * clamped;
-                return `hsl(${hue}, 100%, 60%)`;
-            }
-
-            if (avgSpeed >= maxSpeed - 1e-6) {
-                // No "faster than average" side, map linearly between min and max (blue to green)
+                hue = SPEED_COLOR_HUE_MID +
+                    (SPEED_COLOR_HUE_FAST - SPEED_COLOR_HUE_MID) * clamped;
+            } else if (avgSpeed >= maxSpeed - 1e-6) {
                 const t = (speed - minSpeed) / (maxSpeed - minSpeed);
                 const clamped = Math.min(Math.max(t, 0), 1);
-                const hue = hueSlow + (hueMid - hueSlow) * clamped;
-                return `hsl(${hue}, 100%, 60%)`;
-            }
-
-            // General case: blend slow->mid for speeds below average, mid->fast for above
-            if (speed <= avgSpeed) {
+                hue = SPEED_COLOR_HUE_SLOW +
+                    (SPEED_COLOR_HUE_MID - SPEED_COLOR_HUE_SLOW) * clamped;
+            } else if (speed <= avgSpeed) {
                 const t = (speed - minSpeed) / (avgSpeed - minSpeed);
                 const clamped = Math.min(Math.max(t, 0), 1);
-                const hue = hueSlow + (hueMid - hueSlow) * clamped;
-                return `hsl(${hue}, 100%, 60%)`;
+                hue = SPEED_COLOR_HUE_SLOW +
+                    (SPEED_COLOR_HUE_MID - SPEED_COLOR_HUE_SLOW) * clamped;
             } else {
                 const t = (speed - avgSpeed) / (maxSpeed - avgSpeed);
                 const clamped = Math.min(Math.max(t, 0), 1);
-                const hue = hueMid + (hueFast - hueMid) * clamped;
-                return `hsl(${hue}, 100%, 60%)`;
+                hue = SPEED_COLOR_HUE_MID +
+                    (SPEED_COLOR_HUE_FAST - SPEED_COLOR_HUE_MID) * clamped;
             }
+
+            return {
+                h: hue,
+                s: SPEED_COLOR_SAT,
+                l: SPEED_COLOR_LUM
+            };
         }
 
         function createRandomBall() {
-            const radius = randomInRange(MIN_RADIUS, MAX_RADIUS);
+            const radius = randomInRange(BALL_MIN_RADIUS, BALL_MAX_RADIUS);
 
-            // Start position: inside visible area
             const x = randomInRange(radius, canvas.width - radius);
             const y = randomInRange(radius, canvas.height - radius);
 
-            // Initial velocity: random direction, small magnitude
             const angle = Math.random() * Math.PI * 2;
             const speed = randomInRange(0.2, 1.5);
             const vx = Math.cos(angle) * speed;
             const vy = Math.sin(angle) * speed;
 
-            // Mass proportional to area (r^2) for a simple gravity model
             const mass = radius * radius;
 
-            // Temporary initial color; will be updated in the first frame using speed stats
-            const color = "hsl(120, 100%, 60%)";
+            const color = {
+                h: SPEED_COLOR_HUE_MID,
+                s: SPEED_COLOR_SAT,
+                l: SPEED_COLOR_LUM
+            };
 
-            // Trail points: array of { x, y, t, color }
             const trail = [];
 
             return { x, y, vx, vy, radius, mass, color, trail };
@@ -162,7 +195,6 @@
 
         function addBall() {
             if (balls.length >= MAX_BALLS) {
-                // Remove the oldest ball to keep the simulation stable
                 balls.shift();
             }
             balls.push(createRandomBall());
@@ -170,7 +202,6 @@
 
         function removeBall() {
             if (balls.length > 0) {
-                // Remove the most recently added ball
                 balls.pop();
             }
         }
@@ -178,7 +209,7 @@
         // Add one initial ball so the screen is not empty
         addBall();
 
-        // Keyboard handling: plus / minus independent of keyboard layout and Shift
+        // Keyboard: plus/minus by physical keycode (layout-independent)
         window.addEventListener("keydown", (event) => {
             const code = event.code;
 
@@ -205,14 +236,19 @@
                 return;
             }
 
-            // Remove points older than TRAIL_DURATION
-            while (trail.length > 0 && (timeMs - trail[0].t) > TRAIL_DURATION) {
+            // Remove points older than TRAIL_DURATION_MS
+            while (trail.length > 0 && (timeMs - trail[0].t) > TRAIL_DURATION_MS) {
                 trail.shift();
             }
 
             const lastPoint = trail[trail.length - 1];
             if (!lastPoint) {
-                trail.push({ x: ball.x, y: ball.y, t: timeMs, color: ball.color });
+                trail.push({
+                    x: ball.x,
+                    y: ball.y,
+                    t: timeMs,
+                    color: { h: ball.color.h, s: ball.color.s, l: ball.color.l }
+                });
                 return;
             }
 
@@ -222,18 +258,22 @@
 
             // Only add a new point if the ball moved enough
             if (dist2 >= TRAIL_MIN_DISTANCE * TRAIL_MIN_DISTANCE) {
-                trail.push({ x: ball.x, y: ball.y, t: timeMs, color: ball.color });
+                trail.push({
+                    x: ball.x,
+                    y: ball.y,
+                    t: timeMs,
+                    color: { h: ball.color.h, s: ball.color.s, l: ball.color.l }
+                });
             }
         }
 
         function update(dt, timeMs) {
             const n = balls.length;
 
-            // Reset accelerations for each frame
             const ax = new Array(n).fill(0);
             const ay = new Array(n).fill(0);
 
-            // Pairwise gravity: every ball interacts with every other
+            // Pairwise gravity
             for (let i = 0; i < n; i++) {
                 for (let j = i + 1; j < n; j++) {
                     const bi = balls[i];
@@ -243,7 +283,6 @@
                     const dy = bj.y - bi.y;
                     const dist2Raw = dx * dx + dy * dy;
 
-                    // Softened distance to reduce extreme forces
                     const dist2 = dist2Raw + SOFTENING;
                     const dist = Math.sqrt(dist2);
 
@@ -253,11 +292,9 @@
 
                     const force = (G * bi.mass * bj.mass) / dist2;
 
-                    // Normalized direction vector
                     const fx = (force * dx) / dist;
                     const fy = (force * dy) / dist;
 
-                    // Acceleration = force / mass
                     ax[i] += fx / bi.mass;
                     ay[i] += fy / bi.mass;
 
@@ -266,7 +303,7 @@
                 }
             }
 
-            // Integrate velocities and positions
+            // Integrate physics
             for (let i = 0; i < n; i++) {
                 const b = balls[i];
 
@@ -276,7 +313,7 @@
                 b.x += b.vx * dt;
                 b.y += b.vy * dt;
 
-                // Wall collisions with simple reflection
+                // Wall collisions
                 if (b.x - b.radius < 0) {
                     b.x = b.radius;
                     b.vx = -b.vx * BOUNCE_DAMPING;
@@ -294,7 +331,7 @@
                 }
             }
 
-            // Compute speed statistics for this frame
+            // Speed stats
             const speeds = new Array(n);
             let minSpeed = Infinity;
             let maxSpeed = 0;
@@ -304,18 +341,14 @@
                 const b = balls[i];
                 const speed = Math.sqrt(b.vx * b.vx + b.vy * b.vy);
                 speeds[i] = speed;
-                if (speed < minSpeed) {
-                    minSpeed = speed;
-                }
-                if (speed > maxSpeed) {
-                    maxSpeed = speed;
-                }
+                if (speed < minSpeed) minSpeed = speed;
+                if (speed > maxSpeed) maxSpeed = speed;
                 sumSpeed += speed;
             }
 
             const avgSpeed = n > 0 ? (sumSpeed / n) : 0;
 
-            // Update colors based on relative speed and update trails
+            // Update colors and trails
             for (let i = 0; i < n; i++) {
                 const b = balls[i];
                 const speed = speeds[i];
@@ -331,28 +364,73 @@
                 return;
             }
 
-            // Base line width: 4 times smaller than ball diameter (diameter / 4 = radius / 2)
-            const baseWidth = Math.max(ball.radius / 2, 1);
+            const baseWidth = Math.max(ball.radius * TRAIL_BASE_WIDTH_FACTOR, 1);
 
-            for (let i = 1; i < trail.length; i++) {
+            // Find maximum age for normalization (for young tails)
+            let maxAge = 0;
+            for (let i = 0; i < trail.length; i++) {
+                const age = timeMs - trail[i].t;
+                if (age > maxAge) {
+                    maxAge = age;
+                }
+            }
+
+            let tailAlphaBase = 0;
+            if (maxAge > 0) {
+                const rawTailAlpha = 1 - maxAge / TRAIL_DURATION_MS;
+                tailAlphaBase = Math.min(Math.max(rawTailAlpha, 0), 1);
+            }
+
+            const lastIndex = trail.length - 1;
+
+            // Older segments: fading and thinning
+            for (let i = 1; i < lastIndex; i++) {
                 const p0 = trail[i - 1];
                 const p1 = trail[i];
 
                 const age = timeMs - p1.t;
-                if (age >= TRAIL_DURATION) {
+                if (age >= TRAIL_DURATION_MS) {
                     continue;
                 }
 
-                const alpha = 1 - age / TRAIL_DURATION;
-                if (alpha <= 0) {
+                let alphaBase = 1 - age / TRAIL_DURATION_MS;
+                alphaBase = Math.min(Math.max(alphaBase, 0), 1);
+
+                let alphaNorm;
+                if (tailAlphaBase > 0 && tailAlphaBase < 1) {
+                    alphaNorm = (alphaBase - tailAlphaBase) / (1 - tailAlphaBase);
+                } else {
+                    alphaNorm = alphaBase;
+                }
+                alphaNorm = Math.min(Math.max(alphaNorm, 0), 1);
+
+                const finalAlpha = alphaNorm * TRAIL_MAX_ALPHA;
+                const width = baseWidth * alphaNorm;
+
+                if (finalAlpha <= 0 || width <= 0) {
                     continue;
                 }
 
-                const width = baseWidth * alpha;
+                const colorStr = `hsl(${p1.color.h}, ${p1.color.s}%, ${p1.color.l}%)`;
 
-                ctx.globalAlpha = alpha;
+                ctx.globalAlpha = finalAlpha;
                 ctx.lineWidth = width;
-                ctx.strokeStyle = p1.color;
+                ctx.strokeStyle = colorStr;
+                ctx.beginPath();
+                ctx.moveTo(p0.x, p0.y);
+                ctx.lineTo(p1.x, p1.y);
+                ctx.stroke();
+            }
+
+            // Last segment: same color as ball, full width, alpha = TRAIL_MAX_ALPHA
+            if (lastIndex >= 1) {
+                const p0 = trail[lastIndex - 1];
+                const p1 = trail[lastIndex];
+                const colorStr = `hsl(${p1.color.h}, ${p1.color.s}%, ${p1.color.l}%)`;
+
+                ctx.globalAlpha = TRAIL_MAX_ALPHA;
+                ctx.lineWidth = baseWidth;
+                ctx.strokeStyle = colorStr;
                 ctx.beginPath();
                 ctx.moveTo(p0.x, p0.y);
                 ctx.lineTo(p1.x, p1.y);
@@ -363,18 +441,32 @@
             ctx.lineWidth = 1;
         }
 
+        function drawBall(ball) {
+            const c = ball.color;
+            const gradient = ctx.createRadialGradient(
+                ball.x, ball.y, 0,
+                ball.x, ball.y, ball.radius
+            );
+
+            const centerColor = `hsla(${c.h}, ${c.s}%, ${c.l}%, ${BALL_CENTER_ALPHA})`;
+            const edgeColor = `hsla(${c.h}, ${c.s}%, ${c.l}%, ${BALL_EDGE_ALPHA})`;
+
+            gradient.addColorStop(0.0, centerColor);
+            gradient.addColorStop(BALL_EDGE_SOFT_START, centerColor);
+            gradient.addColorStop(1.0, edgeColor);
+
+            ctx.fillStyle = gradient;
+            ctx.beginPath();
+            ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
         function draw(timeMs) {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
 
             for (const b of balls) {
-                // Draw trail first so the ball is on top
                 drawTrail(b, timeMs);
-
-                // Draw the ball with its current color
-                ctx.beginPath();
-                ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
-                ctx.fillStyle = b.color;
-                ctx.fill();
+                drawBall(b);
             }
         }
 
@@ -382,12 +474,10 @@
             const dtMs = time - lastTime;
             lastTime = time;
 
-            // Normalize dt so that at 60 FPS dt is approximately 1.0
             let dt = dtMs / 16.6667;
             if (dt <= 0 || !Number.isFinite(dt)) {
                 dt = 1;
             } else if (dt > 3) {
-                // Clamp dt to avoid huge simulation jumps after long lags
                 dt = 3;
             }
 
