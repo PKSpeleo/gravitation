@@ -104,7 +104,7 @@
             const hueMid = 120;
             const hueFast = 0;
 
-            // If average coincides with min or max, degrade gracefully
+            // Handle degenerate average cases gracefully
             if (avgSpeed <= minSpeed + 1e-6) {
                 // No "slower than average" side, map linearly between min and max (green to red)
                 const t = (speed - minSpeed) / (maxSpeed - minSpeed);
@@ -121,6 +121,7 @@
                 return `hsl(${hue}, 100%, 60%)`;
             }
 
+            // General case: blend slow->mid for speeds below average, mid->fast for above
             if (speed <= avgSpeed) {
                 const t = (speed - minSpeed) / (avgSpeed - minSpeed);
                 const clamped = Math.min(Math.max(t, 0), 1);
@@ -330,9 +331,8 @@
                 return;
             }
 
-            // Line width is 4 times smaller than ball diameter: diameter / 4 = radius / 2
-            const width = Math.max(ball.radius / 2, 1);
-            ctx.lineWidth = width;
+            // Base line width: 4 times smaller than ball diameter (diameter / 4 = radius / 2)
+            const baseWidth = Math.max(ball.radius / 2, 1);
 
             for (let i = 1; i < trail.length; i++) {
                 const p0 = trail[i - 1];
@@ -348,7 +348,10 @@
                     continue;
                 }
 
+                const width = baseWidth * alpha;
+
                 ctx.globalAlpha = alpha;
+                ctx.lineWidth = width;
                 ctx.strokeStyle = p1.color;
                 ctx.beginPath();
                 ctx.moveTo(p0.x, p0.y);
