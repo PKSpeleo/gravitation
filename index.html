@@ -45,7 +45,7 @@
 <div class="hint">
     Press "=" / "+" (or numpad "+") to add a new ball
     Press "-" (or numpad "-") to remove a ball
-    Balls attract each other with gravity
+    Balls attract each other with gravity and leave fading trails
 </div>
 
 <script>
@@ -79,6 +79,10 @@
         // Hard limit on ball count to avoid huge performance drops
         const MAX_BALLS = 120;
 
+        // Trail settings
+        const TRAIL_DURATION = 5000; // ms, full fade-out time
+        const TRAIL_MIN_DISTANCE = 0.5; // minimal movement before adding a new trail point
+
         function randomInRange(min, max) {
             return min + Math.random() * (max - min);
         }
@@ -103,7 +107,10 @@
             const hue = Math.floor(Math.random() * 360);
             const color = `hsl(${hue}, 100%, 60%)`;
 
-            return { x, y, vx, vy, radius, mass, color };
+            // Trail points: array of { x, y, t }
+            const trail = [];
+
+            return { x, y, vx, vy, radius, mass, color, trail };
         }
 
         function addBall() {
@@ -124,20 +131,17 @@
         // Add one initial ball so the screen is not empty
         addBall();
 
-        // Keyboard handling: plus / minus independent of keyboard layout
+        // Keyboard handling: plus / minus independent of keyboard layout and Shift
         window.addEventListener("keydown", (event) => {
-            const key = event.key;
             const code = event.code;
 
             const isPlus =
-                key === "+" ||
-                code === "NumpadAdd" ||
-                code === "Equal";
+                code === "Equal" ||
+                code === "NumpadAdd";
 
             const isMinus =
-                key === "-" ||
-                code === "NumpadSubtract" ||
-                code === "Minus";
+                code === "Minus" ||
+                code === "NumpadSubtract";
 
             if (isPlus) {
                 addBall();
@@ -148,7 +152,34 @@
 
         let lastTime = performance.now();
 
-        function update(dt) {
+        function updateTrail(ball, timeMs) {
+            const trail = ball.trail;
+            if (!trail) {
+                return;
+            }
+
+            // Remove points older than TRAIL_DURATION
+            while (trail.length > 0 && (timeMs - trail[0].t) > TRAIL_DURATION) {
+                trail.shift();
+            }
+
+            const lastPoint = trail[trail.length - 1];
+            if (!lastPoint) {
+                trail.push({ x: ball.x, y: ball.y, t: timeMs });
+                return;
+            }
+
+            const dx = ball.x - lastPoint.x;
+            const dy = ball.y - lastPoint.y;
+            const dist2 = dx * dx + dy * dy;
+
+            // Only add a new point if the ball moved enough
+            if (dist2 >= TRAIL_MIN_DISTANCE * TRAIL_MIN_DISTANCE) {
+                trail.push({ x: ball.x, y: ball.y, t: timeMs });
+            }
+        }
+
+        function update(dt, timeMs) {
             const n = balls.length;
 
             // Reset accelerations for each frame
@@ -188,7 +219,7 @@
                 }
             }
 
-            // Integrate velocities and positions
+            // Integrate velocities, positions and update trails
             for (let i = 0; i < n; i++) {
                 const b = balls[i];
 
@@ -214,13 +245,55 @@
                     b.y = canvas.height - b.radius;
                     b.vy = -b.vy * BOUNCE_DAMPING;
                 }
+
+                updateTrail(b, timeMs);
             }
         }
 
-        function draw() {
+        function drawTrail(ball, timeMs) {
+            const trail = ball.trail;
+            if (!trail || trail.length < 2) {
+                return;
+            }
+
+            // Line width is 4 times smaller than ball diameter: diameter / 4 = radius / 2
+            const width = Math.max(ball.radius / 2, 1);
+            ctx.lineWidth = width;
+            ctx.strokeStyle = ball.color;
+
+            for (let i = 1; i < trail.length; i++) {
+                const p0 = trail[i - 1];
+                const p1 = trail[i];
+
+                const age = timeMs - p1.t;
+                if (age >= TRAIL_DURATION) {
+                    continue;
+                }
+
+                const alpha = 1 - age / TRAIL_DURATION;
+                if (alpha <= 0) {
+                    continue;
+                }
+
+                ctx.globalAlpha = alpha;
+                ctx.beginPath();
+                ctx.moveTo(p0.x, p0.y);
+                ctx.lineTo(p1.x, p1.y);
+                ctx.stroke();
+            }
+
+            ctx.globalAlpha = 1;
+            ctx.lineWidth = 1;
+        }
+
+        function draw(timeMs) {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
 
             for (const b of balls) {
+                // Draw trail first so the ball is on top
+                drawTrail(b, timeMs);
+
+                // Draw the ball
                 ctx.beginPath();
                 ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
                 ctx.fillStyle = b.color;
@@ -241,8 +314,8 @@
                 dt = 3;
             }
 
-            update(dt);
-            draw();
+            update(dt, time);
+            draw(time);
             requestAnimationFrame(loop);
         }
 
