@@ -18,6 +18,8 @@
             width: 100vw;
             height: 100vh;
             background: #000000;
+            /* Disable scrolling/zooming gestures on mobile inside the canvas */
+            touch-action: none;
         }
 
         .hint {
@@ -234,6 +236,9 @@
         // Add one initial ball so the screen is not empty
         addBall();
 
+        // ------------------------------
+        // Keyboard controls
+        // ------------------------------
         // Keyboard: plus/minus by physical keycode (layout-independent)
         window.addEventListener("keydown", (event) => {
             const code = event.code;
@@ -252,6 +257,60 @@
                 removeBall();
             }
         });
+
+        // ------------------------------
+        // Touch controls (mobile)
+        // ------------------------------
+        // Single-finger tap: add a ball
+        // Two-finger tap: remove a ball
+        // We react only once per gesture and prevent scrolling/zooming.
+        let activeTouchCount = 0;
+
+        function handleTouchStart(event) {
+            // Prevent default browser actions (scroll, zoom) inside the canvas
+            event.preventDefault();
+
+            const count = event.touches.length;
+
+            // Only react when a new gesture starts (no previous active touches)
+            if (activeTouchCount === 0) {
+                if (count === 1) {
+                    addBall();
+                    activeTouchCount = 1;
+                } else if (count === 2) {
+                    removeBall();
+                    activeTouchCount = 2;
+                } else {
+                    // More than 2 fingers: ignore, but mark that gesture is active
+                    activeTouchCount = count;
+                }
+            } else {
+                // Gesture already active; ignore extra touchstart events
+                activeTouchCount = count;
+            }
+        }
+
+        function handleTouchEnd(event) {
+            // Prevent scroll flicks on gesture end
+            event.preventDefault();
+
+            // When all fingers are lifted, reset gesture state
+            if (event.touches.length === 0) {
+                activeTouchCount = 0;
+            } else {
+                activeTouchCount = event.touches.length;
+            }
+        }
+
+        function handleTouchCancel(event) {
+            event.preventDefault();
+            activeTouchCount = 0;
+        }
+
+        // Use non-passive listeners so that preventDefault() works
+        canvas.addEventListener("touchstart", handleTouchStart, { passive: false });
+        canvas.addEventListener("touchend", handleTouchEnd, { passive: false });
+        canvas.addEventListener("touchcancel", handleTouchCancel, { passive: false });
 
         let lastTime = performance.now();
 
