@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8" />
-    <title>Gravity Balls – Screen Test</title>
+    <title>Gravity Balls</title>
     <style>
         html, body {
             margin: 0;
@@ -89,9 +89,10 @@
         // ------------------------------
 
         // Hues for slow / average / fast speeds
-        const SPEED_COLOR_HUE_SLOW = 200; // blue-ish
-        const SPEED_COLOR_HUE_MID  = 120; // green
-        const SPEED_COLOR_HUE_FAST = 0;   // red
+        // Slow: violet/blue, Mid: green, Fast: red
+        const SPEED_COLOR_HUE_SLOW = 260;
+        const SPEED_COLOR_HUE_MID  = 140;
+        const SPEED_COLOR_HUE_FAST = 0;
 
         // Saturation and lightness for all speeds
         const SPEED_COLOR_SAT = 100;
@@ -122,8 +123,12 @@
             return min + Math.random() * (max - min);
         }
 
-        // Map scalar speed to an HSL color object based on current frame stats
-        // Slow: blue, average: green, fast: red
+        function clamp01(v) {
+            return v < 0 ? 0 : (v > 1 ? 1 : v);
+        }
+
+        // Map scalar speed to an HSL color object based on current frame stats.
+        // Slow: violet/blue, average: green, fast: orange/red with strong red at the very top.
         function getColorForSpeed(speed, minSpeed, avgSpeed, maxSpeed) {
             if (!Number.isFinite(speed)) {
                 speed = 0;
@@ -138,28 +143,48 @@
                 };
             }
 
+            // Clamp speed range
+            if (speed <= minSpeed) {
+                return {
+                    h: SPEED_COLOR_HUE_SLOW,
+                    s: SPEED_COLOR_SAT,
+                    l: SPEED_COLOR_LUM
+                };
+            }
+
+            if (speed >= maxSpeed) {
+                return {
+                    h: SPEED_COLOR_HUE_FAST,
+                    s: SPEED_COLOR_SAT,
+                    l: SPEED_COLOR_LUM
+                };
+            }
+
             let hue;
 
-            if (avgSpeed <= minSpeed + 1e-6) {
-                const t = (speed - minSpeed) / (maxSpeed - minSpeed);
-                const clamped = Math.min(Math.max(t, 0), 1);
-                hue = SPEED_COLOR_HUE_MID +
-                    (SPEED_COLOR_HUE_FAST - SPEED_COLOR_HUE_MID) * clamped;
-            } else if (avgSpeed >= maxSpeed - 1e-6) {
-                const t = (speed - minSpeed) / (maxSpeed - minSpeed);
-                const clamped = Math.min(Math.max(t, 0), 1);
+            // Below or equal to average: interpolate from slow to mid
+            if (speed <= avgSpeed && avgSpeed > minSpeed) {
+                const t = clamp01((speed - minSpeed) / (avgSpeed - minSpeed));
                 hue = SPEED_COLOR_HUE_SLOW +
-                    (SPEED_COLOR_HUE_MID - SPEED_COLOR_HUE_SLOW) * clamped;
-            } else if (speed <= avgSpeed) {
-                const t = (speed - minSpeed) / (avgSpeed - minSpeed);
-                const clamped = Math.min(Math.max(t, 0), 1);
-                hue = SPEED_COLOR_HUE_SLOW +
-                    (SPEED_COLOR_HUE_MID - SPEED_COLOR_HUE_SLOW) * clamped;
+                    (SPEED_COLOR_HUE_MID - SPEED_COLOR_HUE_SLOW) * t;
+            }
+                // Above average: interpolate from mid to fast,
+            // and force top fast speeds to pure red
+            else if (speed > avgSpeed && maxSpeed > avgSpeed) {
+                const tRaw = (speed - avgSpeed) / (maxSpeed - avgSpeed);
+                const t = clamp01(tRaw);
+
+                // If we are in the top 30% of the high-speed range -> pure red
+                const RED_THRESHOLD = 0.7;
+                if (t >= RED_THRESHOLD) {
+                    hue = SPEED_COLOR_HUE_FAST;
+                } else {
+                    const tNorm = t / RED_THRESHOLD;
+                    hue = SPEED_COLOR_HUE_MID +
+                        (SPEED_COLOR_HUE_FAST - SPEED_COLOR_HUE_MID) * tNorm;
+                }
             } else {
-                const t = (speed - avgSpeed) / (maxSpeed - avgSpeed);
-                const clamped = Math.min(Math.max(t, 0), 1);
-                hue = SPEED_COLOR_HUE_MID +
-                    (SPEED_COLOR_HUE_FAST - SPEED_COLOR_HUE_MID) * clamped;
+                hue = SPEED_COLOR_HUE_MID;
             }
 
             return {
