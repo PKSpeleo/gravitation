@@ -45,7 +45,7 @@
 <div class="hint">
     Press "=" / "+" (or numpad "+") to add a new ball
     Press "-" (or numpad "-") to remove a ball
-    Balls attract each other with gravity and leave fading trails
+    Color shows speed relative to average, trails show past speed
 </div>
 
 <script>
@@ -87,6 +87,53 @@
             return min + Math.random() * (max - min);
         }
 
+        // Map scalar speed to an HSL color based on current frame stats
+        // Slow: blue (hue ~200), average: green (hue ~120), fast: red (hue ~0)
+        function getColorForSpeed(speed, minSpeed, avgSpeed, maxSpeed) {
+            if (!Number.isFinite(speed)) {
+                speed = 0;
+            }
+
+            // Fallback if all speeds are identical (or only one ball)
+            if (!Number.isFinite(minSpeed) || !Number.isFinite(maxSpeed) ||
+                maxSpeed <= minSpeed + 1e-6) {
+                return "hsl(120, 100%, 60%)";
+            }
+
+            const hueSlow = 200;
+            const hueMid = 120;
+            const hueFast = 0;
+
+            // If average coincides with min or max, degrade gracefully
+            if (avgSpeed <= minSpeed + 1e-6) {
+                // No "slower than average" side, map linearly between min and max (green to red)
+                const t = (speed - minSpeed) / (maxSpeed - minSpeed);
+                const clamped = Math.min(Math.max(t, 0), 1);
+                const hue = hueMid + (hueFast - hueMid) * clamped;
+                return `hsl(${hue}, 100%, 60%)`;
+            }
+
+            if (avgSpeed >= maxSpeed - 1e-6) {
+                // No "faster than average" side, map linearly between min and max (blue to green)
+                const t = (speed - minSpeed) / (maxSpeed - minSpeed);
+                const clamped = Math.min(Math.max(t, 0), 1);
+                const hue = hueSlow + (hueMid - hueSlow) * clamped;
+                return `hsl(${hue}, 100%, 60%)`;
+            }
+
+            if (speed <= avgSpeed) {
+                const t = (speed - minSpeed) / (avgSpeed - minSpeed);
+                const clamped = Math.min(Math.max(t, 0), 1);
+                const hue = hueSlow + (hueMid - hueSlow) * clamped;
+                return `hsl(${hue}, 100%, 60%)`;
+            } else {
+                const t = (speed - avgSpeed) / (maxSpeed - avgSpeed);
+                const clamped = Math.min(Math.max(t, 0), 1);
+                const hue = hueMid + (hueFast - hueMid) * clamped;
+                return `hsl(${hue}, 100%, 60%)`;
+            }
+        }
+
         function createRandomBall() {
             const radius = randomInRange(MIN_RADIUS, MAX_RADIUS);
 
@@ -103,11 +150,10 @@
             // Mass proportional to area (r^2) for a simple gravity model
             const mass = radius * radius;
 
-            // Bright HSL color for good visibility on black background
-            const hue = Math.floor(Math.random() * 360);
-            const color = `hsl(${hue}, 100%, 60%)`;
+            // Temporary initial color; will be updated in the first frame using speed stats
+            const color = "hsl(120, 100%, 60%)";
 
-            // Trail points: array of { x, y, t }
+            // Trail points: array of { x, y, t, color }
             const trail = [];
 
             return { x, y, vx, vy, radius, mass, color, trail };
@@ -165,7 +211,7 @@
 
             const lastPoint = trail[trail.length - 1];
             if (!lastPoint) {
-                trail.push({ x: ball.x, y: ball.y, t: timeMs });
+                trail.push({ x: ball.x, y: ball.y, t: timeMs, color: ball.color });
                 return;
             }
 
@@ -175,7 +221,7 @@
 
             // Only add a new point if the ball moved enough
             if (dist2 >= TRAIL_MIN_DISTANCE * TRAIL_MIN_DISTANCE) {
-                trail.push({ x: ball.x, y: ball.y, t: timeMs });
+                trail.push({ x: ball.x, y: ball.y, t: timeMs, color: ball.color });
             }
         }
 
@@ -219,7 +265,7 @@
                 }
             }
 
-            // Integrate velocities, positions and update trails
+            // Integrate velocities and positions
             for (let i = 0; i < n; i++) {
                 const b = balls[i];
 
@@ -245,7 +291,35 @@
                     b.y = canvas.height - b.radius;
                     b.vy = -b.vy * BOUNCE_DAMPING;
                 }
+            }
 
+            // Compute speed statistics for this frame
+            const speeds = new Array(n);
+            let minSpeed = Infinity;
+            let maxSpeed = 0;
+            let sumSpeed = 0;
+
+            for (let i = 0; i < n; i++) {
+                const b = balls[i];
+                const speed = Math.sqrt(b.vx * b.vx + b.vy * b.vy);
+                speeds[i] = speed;
+                if (speed < minSpeed) {
+                    minSpeed = speed;
+                }
+                if (speed > maxSpeed) {
+                    maxSpeed = speed;
+                }
+                sumSpeed += speed;
+            }
+
+            const avgSpeed = n > 0 ? (sumSpeed / n) : 0;
+
+            // Update colors based on relative speed and update trails
+            for (let i = 0; i < n; i++) {
+                const b = balls[i];
+                const speed = speeds[i];
+
+                b.color = getColorForSpeed(speed, minSpeed, avgSpeed, maxSpeed);
                 updateTrail(b, timeMs);
             }
         }
@@ -259,7 +333,6 @@
             // Line width is 4 times smaller than ball diameter: diameter / 4 = radius / 2
             const width = Math.max(ball.radius / 2, 1);
             ctx.lineWidth = width;
-            ctx.strokeStyle = ball.color;
 
             for (let i = 1; i < trail.length; i++) {
                 const p0 = trail[i - 1];
@@ -276,6 +349,7 @@
                 }
 
                 ctx.globalAlpha = alpha;
+                ctx.strokeStyle = p1.color;
                 ctx.beginPath();
                 ctx.moveTo(p0.x, p0.y);
                 ctx.lineTo(p1.x, p1.y);
@@ -293,7 +367,7 @@
                 // Draw trail first so the ball is on top
                 drawTrail(b, timeMs);
 
-                // Draw the ball
+                // Draw the ball with its current color
                 ctx.beginPath();
                 ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
                 ctx.fillStyle = b.color;
