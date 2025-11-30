@@ -233,8 +233,10 @@
             }
         }
 
-        // Add one initial ball so the screen is not empty
-        addBall();
+        // Add initial balls so the screen is not empty
+        for (let i = 0; i < 3; i++) {
+            addBall();
+        }
 
         // ------------------------------
         // Keyboard controls
