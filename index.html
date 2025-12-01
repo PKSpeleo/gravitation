@@ -65,7 +65,6 @@
         const BALL_MAX_RADIUS = 20;
 
         // Fraction of radius where the solid core ends and the soft edge begins.
-        // Example: 0.75 -> inner 75% solid, outer 25% soft edge.
         const BALL_EDGE_SOFT_START = 0.1;
 
         // Alpha for the center and edge of the ball gradient
@@ -83,7 +82,6 @@
         const TRAIL_MIN_DISTANCE = 0.5;
 
         // Base width of the trail as a fraction of ball radius.
-        // Example: 0.5 -> baseWidth = radius * 0.5
         const TRAIL_BASE_WIDTH_FACTOR = 0.5;
 
         // Maximum alpha for the trail (the freshest segment near the ball)
@@ -116,10 +114,18 @@
         // ------------------------------
         // Max radius of collision ring: factor * (r1 + r2)
         const COLLISION_RING_RADIUS_FACTOR = 4.0;
-        // Lifetime of the collision ring in ms
+        // Lifetime of the collision/merge ring in ms
         const COLLISION_RING_DURATION_MS = 400;
         // Ring thickness as a fraction of current radius
         const COLLISION_RING_THICKNESS_FACTOR = 0.3;
+
+        // ------------------------------
+        // Merge (fusion) parameters
+        // ------------------------------
+        // How long balls must stay "near" each other to merge (ms)
+        const MERGE_STAY_TIME_MS = 500;
+        // "Near" distance factor for merge timers: nearDist = factor * (r1 + r2)
+        const MERGE_NEAR_DISTANCE_FACTOR = 2.0;
 
         // ------------------------------
         // Canvas and resize handling
@@ -134,6 +140,12 @@
 
         const balls = [];
         const collisionRings = [];
+
+        // Pair proximity tracking for merges: key "id1-id2" -> { start }
+        const pairProximity = new Map();
+
+        // Unique IDs for balls
+        let nextBallId = 1;
 
         function randomInRange(min, max) {
             return min + Math.random() * (max - min);
@@ -159,7 +171,6 @@
                 };
             }
 
-            // Clamp speed range
             if (speed <= minSpeed) {
                 return {
                     h: SPEED_COLOR_HUE_SLOW,
@@ -178,19 +189,14 @@
 
             let hue;
 
-            // Below or equal to average: interpolate from slow to mid
             if (speed <= avgSpeed && avgSpeed > minSpeed) {
                 const t = clamp01((speed - minSpeed) / (avgSpeed - minSpeed));
                 hue = SPEED_COLOR_HUE_SLOW +
                     (SPEED_COLOR_HUE_MID - SPEED_COLOR_HUE_SLOW) * t;
-            }
-                // Above average: interpolate from mid to fast,
-            // and force top fast speeds to pure red
-            else if (speed > avgSpeed && maxSpeed > avgSpeed) {
+            } else if (speed > avgSpeed && maxSpeed > avgSpeed) {
                 const tRaw = (speed - avgSpeed) / (maxSpeed - avgSpeed);
                 const t = clamp01(tRaw);
 
-                // If we are in the top 30% of the high-speed range -> pure red
                 const RED_THRESHOLD = 0.7;
                 if (t >= RED_THRESHOLD) {
                     hue = SPEED_COLOR_HUE_FAST;
@@ -231,7 +237,17 @@
 
             const trail = [];
 
-            return { x, y, vx, vy, radius, mass, color, trail };
+            return {
+                id: nextBallId++,
+                x,
+                y,
+                vx,
+                vy,
+                radius,
+                mass,
+                color,
+                trail
+            };
         }
 
         function addBall() {
@@ -255,7 +271,6 @@
         // ------------------------------
         // Keyboard controls
         // ------------------------------
-        // Keyboard: plus/minus by physical keycode (layout-independent)
         window.addEventListener("keydown", (event) => {
             const code = event.code;
 
@@ -283,24 +298,20 @@
         let secondTapMode = false;
 
         function handleTouchStart(event) {
-            // Prevent default browser actions (scroll, zoom) inside the canvas
             event.preventDefault();
 
             const touches = event.touches;
 
-            // If there is no primary touch yet, take the first active touch as primary
             if (primaryTouchId === null && touches.length > 0) {
                 primaryTouchId = touches[0].identifier;
                 secondTapMode = false;
                 return;
             }
 
-            // If primary finger is already down, any new non-primary touch acts as "remove" trigger
             if (primaryTouchId !== null) {
                 for (let i = 0; i < event.changedTouches.length; i++) {
                     const t = event.changedTouches[i];
                     if (t.identifier !== primaryTouchId) {
-                        // This is a tap with a second finger while first is held
                         removeBall();
                         secondTapMode = true;
                     }
@@ -309,25 +320,19 @@
         }
 
         function handleTouchEnd(event) {
-            // Prevent scroll flicks on gesture end
             event.preventDefault();
 
-            // Check if primary touch ended
             for (let i = 0; i < event.changedTouches.length; i++) {
                 const t = event.changedTouches[i];
                 if (t.identifier === primaryTouchId) {
-                    // Primary finger was released
                     if (!secondTapMode) {
-                        // No second-finger usage: treat as single tap -> add ball
                         addBall();
                     }
-                    // Reset state after primary ends
                     primaryTouchId = null;
                     secondTapMode = false;
                 }
             }
 
-            // If all touches are gone, reset safety
             if (event.touches.length === 0) {
                 primaryTouchId = null;
                 secondTapMode = false;
@@ -340,7 +345,6 @@
             secondTapMode = false;
         }
 
-        // Use non-passive listeners so that preventDefault() works
         canvas.addEventListener("touchstart", handleTouchStart, { passive: false });
         canvas.addEventListener("touchend", handleTouchEnd, { passive: false });
         canvas.addEventListener("touchcancel", handleTouchCancel, { passive: false });
@@ -348,10 +352,11 @@
         let lastTime = performance.now();
 
         // ------------------------------
-        // Collision handling (elastic) + rings
+        // Collision handling (elastic) + merge + rings
         // ------------------------------
         function handleCollisions(timeMs) {
             const n = balls.length;
+            const mergeEvents = [];
 
             for (let i = 0; i < n; i++) {
                 for (let j = i + 1; j < n; j++) {
@@ -367,18 +372,65 @@
 
                     const dist = Math.sqrt(dist2);
                     const sumR = bi.radius + bj.radius;
+                    const nearDist = sumR * MERGE_NEAR_DISTANCE_FACTOR;
 
-                    // Check geometric overlap
+                    const key = bi.id < bj.id ? (bi.id + "-" + bj.id) : (bj.id + "-" + bi.id);
+
+                    // Track "near" time for merge
+                    if (dist < nearDist) {
+                        let record = pairProximity.get(key);
+                        if (!record) {
+                            record = { start: timeMs };
+                            pairProximity.set(key, record);
+                        }
+                        const closeDuration = timeMs - record.start;
+
+                        const shouldMerge =
+                            closeDuration >= MERGE_STAY_TIME_MS && dist < sumR;
+
+                        if (shouldMerge) {
+                            const m1 = bi.mass;
+                            const m2 = bj.mass;
+                            const totalMass = m1 + m2;
+                            if (totalMass > 0) {
+                                const cx = (bi.x * m1 + bj.x * m2) / totalMass;
+                                const cy = (bi.y * m1 + bj.y * m2) / totalMass;
+
+                                const speedA = Math.sqrt(bi.vx * bi.vx + bi.vy * bi.vy);
+                                const speedB = Math.sqrt(bj.vx * bj.vx + bj.vy * bj.vy);
+                                const avgSpeedPair = 0.5 * (speedA + speedB);
+
+                                mergeEvents.push({
+                                    id1: bi.id,
+                                    id2: bj.id,
+                                    cx,
+                                    cy,
+                                    sumR,
+                                    avgSpeedPair
+                                });
+                            }
+                            pairProximity.delete(key);
+                            // Skip elastic collision for this pair this frame
+                            continue;
+                        }
+                    } else {
+                        if (pairProximity.has(key)) {
+                            pairProximity.delete(key);
+                        }
+                    }
+
+                    // Geometric overlap -> elastic collision + outward ring
                     if (dist < sumR) {
                         const nx = dx / dist;
                         const ny = dy / dist;
 
-                        // Separate overlapped balls based on their masses
                         const overlap = sumR - dist;
-                        const totalMass = bi.mass + bj.mass;
+                        const m1 = bi.mass;
+                        const m2 = bj.mass;
+                        const totalMass = m1 + m2;
                         if (totalMass > 0) {
-                            const moveA = overlap * (bj.mass / totalMass);
-                            const moveB = overlap * (bi.mass / totalMass);
+                            const moveA = overlap * (m2 / totalMass);
+                            const moveB = overlap * (m1 / totalMass);
 
                             bi.x -= nx * moveA;
                             bi.y -= ny * moveA;
@@ -386,12 +438,10 @@
                             bj.y += ny * moveB;
                         }
 
-                        // Speeds before collision for the ring color
                         const speedA_before = Math.sqrt(bi.vx * bi.vx + bi.vy * bi.vy);
                         const speedB_before = Math.sqrt(bj.vx * bj.vx + bj.vy * bj.vy);
                         const avgSpeedPair = 0.5 * (speedA_before + speedB_before);
 
-                        // Perfectly elastic collision in 2D along the normal
                         const v1n = bi.vx * nx + bi.vy * ny;
                         const v2n = bj.vx * nx + bj.vy * ny;
 
@@ -400,8 +450,6 @@
                         const v2t_x = bj.vx - v2n * nx;
                         const v2t_y = bj.vy - v2n * ny;
 
-                        const m1 = bi.mass;
-                        const m2 = bj.mass;
                         const invMassSum = 1 / (m1 + m2);
 
                         const v1nPrime =
@@ -414,11 +462,9 @@
                         bj.vx = v2t_x + v2nPrime * nx;
                         bj.vy = v2t_y + v2nPrime * ny;
 
-                        // Collision center (mass-weighted center of the pair)
                         const cx = (bi.x * m1 + bj.x * m2) / (m1 + m2);
                         const cy = (bi.y * m1 + bj.y * m2) / (m1 + m2);
 
-                        // Map average pair speed to a color using a fixed scale
                         const fakeMin = 0;
                         const fakeMid = 1.0;
                         const fakeMax = 2.5;
@@ -437,10 +483,105 @@
                             color: ringColor,
                             createdAt: timeMs,
                             duration: COLLISION_RING_DURATION_MS,
-                            maxRadius
+                            maxRadius,
+                            type: "out"
                         });
                     }
                 }
+            }
+
+            if (mergeEvents.length === 0) {
+                return;
+            }
+
+            const idsToRemove = new Set();
+            const newBallsToAdd = [];
+
+            for (const evt of mergeEvents) {
+                if (idsToRemove.has(evt.id1) || idsToRemove.has(evt.id2)) {
+                    continue;
+                }
+
+                const idx1 = balls.findIndex(b => b.id === evt.id1);
+                const idx2 = balls.findIndex(b => b.id === evt.id2);
+                if (idx1 === -1 || idx2 === -1 || idx1 === idx2) {
+                    continue;
+                }
+
+                const b1 = balls[idx1];
+                const b2 = balls[idx2];
+
+                const m1 = b1.mass;
+                const m2 = b2.mass;
+                const totalMass = m1 + m2;
+                if (!Number.isFinite(totalMass) || totalMass <= 0) {
+                    continue;
+                }
+
+                const newX = (b1.x * m1 + b2.x * m2) / totalMass;
+                const newY = (b1.y * m1 + b2.y * m2) / totalMass;
+                const newVx = (b1.vx * m1 + b2.vx * m2) / totalMass;
+                const newVy = (b1.vy * m1 + b2.vy * m2) / totalMass;
+                const newRadius = Math.sqrt(totalMass);
+
+                newBallsToAdd.push({
+                    id: nextBallId++,
+                    x: newX,
+                    y: newY,
+                    vx: newVx,
+                    vy: newVy,
+                    radius: newRadius,
+                    mass: totalMass,
+                    color: {
+                        h: SPEED_COLOR_HUE_MID,
+                        s: SPEED_COLOR_SAT,
+                        l: SPEED_COLOR_LUM
+                    },
+                    trail: []
+                });
+
+                idsToRemove.add(evt.id1);
+                idsToRemove.add(evt.id2);
+
+                const fakeMin = 0;
+                const fakeMid = 1.0;
+                const fakeMax = 2.5;
+                const ringColor = getColorForSpeed(
+                    evt.avgSpeedPair,
+                    fakeMin,
+                    fakeMid,
+                    fakeMax
+                );
+
+                const maxRadius = COLLISION_RING_RADIUS_FACTOR * evt.sumR;
+
+                collisionRings.push({
+                    x: evt.cx,
+                    y: evt.cy,
+                    color: ringColor,
+                    createdAt: timeMs,
+                    duration: COLLISION_RING_DURATION_MS,
+                    maxRadius,
+                    type: "in"
+                });
+            }
+
+            if (idsToRemove.size > 0) {
+                const remaining = [];
+                for (const b of balls) {
+                    if (!idsToRemove.has(b.id)) {
+                        remaining.push(b);
+                    }
+                }
+                for (const nb of newBallsToAdd) {
+                    remaining.push(nb);
+                }
+                balls.length = 0;
+                for (const b of remaining) {
+                    balls.push(b);
+                }
+
+                pairProximity.clear();
             }
         }
 
@@ -450,7 +591,6 @@
                 return;
             }
 
-            // Remove points older than TRAIL_DURATION_MS
             while (trail.length > 0 && (timeMs - trail[0].t) > TRAIL_DURATION_MS) {
                 trail.shift();
             }
@@ -470,7 +610,6 @@
             const dy = ball.y - lastPoint.y;
             const dist2 = dx * dx + dy * dy;
 
-            // Only add a new point if the ball moved enough
             if (dist2 >= TRAIL_MIN_DISTANCE * TRAIL_MIN_DISTANCE) {
                 trail.push({
                     x: ball.x,
@@ -482,6 +621,9 @@
         }
 
         function update(dt, timeMs) {
+            // We use a local n before collisions for forces,
+            // but after handleCollisions() balls.length may change,
+            // so we recompute n for speed/color passes.
             const n = balls.length;
 
             const ax = new Array(n).fill(0);
@@ -545,16 +687,18 @@
                 }
             }
 
-            // Handle elastic collisions and spawn rings
+            // Elastic collisions + merges + rings (may change balls.length)
             handleCollisions(timeMs);
 
-            // Speed stats
-            const speeds = new Array(n);
+            // Recompute n after possible merges/removals
+            const nAfter = balls.length;
+
+            const speeds = new Array(nAfter);
             let minSpeed = Infinity;
             let maxSpeed = 0;
             let sumSpeed = 0;
 
-            for (let i = 0; i < n; i++) {
+            for (let i = 0; i < nAfter; i++) {
                 const b = balls[i];
                 const speed = Math.sqrt(b.vx * b.vx + b.vy * b.vy);
                 speeds[i] = speed;
@@ -563,10 +707,9 @@
                 sumSpeed += speed;
             }
 
-            const avgSpeed = n > 0 ? (sumSpeed / n) : 0;
+            const avgSpeed = nAfter > 0 ? (sumSpeed / nAfter) : 0;
 
-            // Update colors and trails
-            for (let i = 0; i < n; i++) {
+            for (let i = 0; i < nAfter; i++) {
                 const b = balls[i];
                 const speed = speeds[i];
 
@@ -586,7 +729,13 @@
                 }
 
                 const t = age / ring.duration;
-                const radius = ring.maxRadius * t;
+                let radius;
+                if (ring.type === "in") {
+                    radius = ring.maxRadius * (1 - t);
+                } else {
+                    radius = ring.maxRadius * t;
+                }
+
                 const alpha = 1 - t;
 
                 if (radius <= 0 || alpha <= 0) {
@@ -619,7 +768,6 @@
 
             const baseWidth = Math.max(ball.radius * TRAIL_BASE_WIDTH_FACTOR, 1);
 
-            // Find maximum age for normalization (for young tails)
             let maxAge = 0;
             for (let i = 0; i < trail.length; i++) {
                 const age = timeMs - trail[i].t;
@@ -636,7 +784,6 @@
 
             const lastIndex = trail.length - 1;
 
-            // Older segments: fading and thinning
             for (let i = 1; i < lastIndex; i++) {
                 const p0 = trail[i - 1];
                 const p1 = trail[i];
@@ -675,7 +822,6 @@
                 ctx.stroke();
             }
 
-            // Last segment: same color as ball, full width, alpha = TRAIL_MAX_ALPHA
             if (lastIndex >= 1) {
                 const p0 = trail[lastIndex - 1];
                 const p1 = trail[lastIndex];
@@ -717,7 +863,6 @@
         function draw(timeMs) {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-            // Draw collision rings first, then trails+balls
             drawCollisionRings(timeMs);
 
             for (const b of balls) {
