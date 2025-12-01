@@ -112,6 +112,16 @@
         const MAX_BALLS = 120;
 
         // ------------------------------
+        // Collision ring effect
+        // ------------------------------
+        // Max radius of collision ring: factor * (r1 + r2)
+        const COLLISION_RING_RADIUS_FACTOR = 4.0;
+        // Lifetime of the collision ring in ms
+        const COLLISION_RING_DURATION_MS = 400;
+        // Ring thickness as a fraction of current radius
+        const COLLISION_RING_THICKNESS_FACTOR = 0.3;
+
+        // ------------------------------
         // Canvas and resize handling
         // ------------------------------
         function resizeCanvas() {
@@ -123,6 +133,7 @@
         resizeCanvas();
 
         const balls = [];
+        const collisionRings = [];
 
         function randomInRange(min, max) {
             return min + Math.random() * (max - min);
@@ -336,6 +347,103 @@
 
         let lastTime = performance.now();
 
+        // ------------------------------
+        // Collision handling (elastic) + rings
+        // ------------------------------
+        function handleCollisions(timeMs) {
+            const n = balls.length;
+
+            for (let i = 0; i < n; i++) {
+                for (let j = i + 1; j < n; j++) {
+                    const bi = balls[i];
+                    const bj = balls[j];
+
+                    const dx = bj.x - bi.x;
+                    const dy = bj.y - bi.y;
+                    const dist2 = dx * dx + dy * dy;
+                    if (dist2 <= 0) {
+                        continue;
+                    }
+
+                    const dist = Math.sqrt(dist2);
+                    const sumR = bi.radius + bj.radius;
+
+                    // Check geometric overlap
+                    if (dist < sumR) {
+                        const nx = dx / dist;
+                        const ny = dy / dist;
+
+                        // Separate overlapped balls based on their masses
+                        const overlap = sumR - dist;
+                        const totalMass = bi.mass + bj.mass;
+                        if (totalMass > 0) {
+                            const moveA = overlap * (bj.mass / totalMass);
+                            const moveB = overlap * (bi.mass / totalMass);
+
+                            bi.x -= nx * moveA;
+                            bi.y -= ny * moveA;
+                            bj.x += nx * moveB;
+                            bj.y += ny * moveB;
+                        }
+
+                        // Speeds before collision for the ring color
+                        const speedA_before = Math.sqrt(bi.vx * bi.vx + bi.vy * bi.vy);
+                        const speedB_before = Math.sqrt(bj.vx * bj.vx + bj.vy * bj.vy);
+                        const avgSpeedPair = 0.5 * (speedA_before + speedB_before);
+
+                        // Perfectly elastic collision in 2D along the normal
+                        const v1n = bi.vx * nx + bi.vy * ny;
+                        const v2n = bj.vx * nx + bj.vy * ny;
+
+                        const v1t_x = bi.vx - v1n * nx;
+                        const v1t_y = bi.vy - v1n * ny;
+                        const v2t_x = bj.vx - v2n * nx;
+                        const v2t_y = bj.vy - v2n * ny;
+
+                        const m1 = bi.mass;
+                        const m2 = bj.mass;
+                        const invMassSum = 1 / (m1 + m2);
+
+                        const v1nPrime =
+                            (v1n * (m1 - m2) + 2 * m2 * v2n) * invMassSum;
+                        const v2nPrime =
+                            (v2n * (m2 - m1) + 2 * m1 * v1n) * invMassSum;
+
+                        bi.vx = v1t_x + v1nPrime * nx;
+                        bi.vy = v1t_y + v1nPrime * ny;
+                        bj.vx = v2t_x + v2nPrime * nx;
+                        bj.vy = v2t_y + v2nPrime * ny;
+
+                        // Collision center (mass-weighted center of the pair)
+                        const cx = (bi.x * m1 + bj.x * m2) / (m1 + m2);
+                        const cy = (bi.y * m1 + bj.y * m2) / (m1 + m2);
+
+                        // Map average pair speed to a color using a fixed scale
+                        const fakeMin = 0;
+                        const fakeMid = 1.0;
+                        const fakeMax = 2.5;
+                        const ringColor = getColorForSpeed(
+                            avgSpeedPair,
+                            fakeMin,
+                            fakeMid,
+                            fakeMax
+                        );
+
+                        const maxRadius = COLLISION_RING_RADIUS_FACTOR * sumR;
+
+                        collisionRings.push({
+                            x: cx,
+                            y: cy,
+                            color: ringColor,
+                            createdAt: timeMs,
+                            duration: COLLISION_RING_DURATION_MS,
+                            maxRadius
+                        });
+                    }
+                }
+            }
+        }
+
         function updateTrail(ball, timeMs) {
             const trail = ball.trail;
             if (!trail) {
@@ -437,6 +545,9 @@
                 }
             }
 
+            // Handle elastic collisions and spawn rings
+            handleCollisions(timeMs);
+
             // Speed stats
             const speeds = new Array(n);
             let minSpeed = Infinity;
@@ -461,6 +572,42 @@
 
                 b.color = getColorForSpeed(speed, minSpeed, avgSpeed, maxSpeed);
                 updateTrail(b, timeMs);
+            }
+        }
+
+        function drawCollisionRings(timeMs) {
+            for (let i = collisionRings.length - 1; i >= 0; i--) {
+                const ring = collisionRings[i];
+                const age = timeMs - ring.createdAt;
+
+                if (age >= ring.duration) {
+                    collisionRings.splice(i, 1);
+                    continue;
+                }
+
+                const t = age / ring.duration;
+                const radius = ring.maxRadius * t;
+                const alpha = 1 - t;
+
+                if (radius <= 0 || alpha <= 0) {
+                    continue;
+                }
+
+                const thickness = radius * COLLISION_RING_THICKNESS_FACTOR;
+                if (thickness <= 0) {
+                    continue;
+                }
+
+                const colorStr = `hsla(${ring.color.h}, ${ring.color.s}%, ${ring.color.l}%, ${alpha})`;
+
+                ctx.save();
+                ctx.globalAlpha = alpha;
+                ctx.lineWidth = thickness;
+                ctx.strokeStyle = colorStr;
+                ctx.beginPath();
+                ctx.arc(ring.x, ring.y, radius, 0, Math.PI * 2);
+                ctx.stroke();
+                ctx.restore();
             }
         }
 
@@ -569,6 +716,9 @@
 
         function draw(timeMs) {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Draw collision rings first, then trails+balls
+            drawCollisionRings(timeMs);
 
             for (const b of balls) {
                 drawTrail(b, timeMs);
